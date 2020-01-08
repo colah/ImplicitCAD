@@ -11,7 +11,7 @@
 
 module Graphics.Implicit.ExtOpenScad.Eval.Statement (runStatementI) where
 
-import Prelude(Maybe(Just, Nothing), Bool(True, False), Either(Left, Right), (.), ($), show, pure, (<>), reverse, fst, snd, readFile, filter, length, (&&), (==), (/=), fmap, notElem, elem, not, zip, init, last, null, String, (*>), (<$>))
+import Prelude(Maybe(Just, Nothing), Bool(True, False), Either(Left, Right), (.), ($), show, pure, (<>), reverse, fst, snd, readFile, filter, length, (&&), (==), (/=), fmap, notElem, elem, not, zip, init, last, null, String, (*>), (<$>), traverse, (>>=), (<$))
 
 import Graphics.Implicit.ExtOpenScad.Definitions (
                                                   Statement(Include, (:=), If, NewModule, ModuleCall, DoNothing),
@@ -22,15 +22,15 @@ import Graphics.Implicit.ExtOpenScad.Definitions (
                                                   StatementI(StatementI),
                                                   Symbol(Symbol),
                                                   Message(Message),
-                                                  ScadOpts(ScadOpts),
+                                                  ScadOpts(importsAllowed),
                                                   StateC,
-                                                  CompState(CompState),
+                                                  CompState(messages, CompState, filePath, scadOpts),
                                                   varUnion
                                                  )
 
 import Graphics.Implicit.ExtOpenScad.Util.OVal (getErrors)
 import Graphics.Implicit.ExtOpenScad.Util.ArgParser (argument, defaultTo, argMap)
-import Graphics.Implicit.ExtOpenScad.Util.StateC (errorC, warnC, modifyVarLookup, mapMaybeM, scadOptions, lookupVar, pushVals, getRelPath, withPathShiftedBy, getVals, putVals, addMessage, getVarLookup)
+import Graphics.Implicit.ExtOpenScad.Util.StateC (errorC, warnC, modifyVarLookup, scadOptions, lookupVar, pushVals, getRelPath, withPathShiftedBy, getVals, putVals, addMessage, getVarLookup)
 import Graphics.Implicit.ExtOpenScad.Eval.Expr (evalExpr, matchPat)
 import Graphics.Implicit.ExtOpenScad.Parser.Statement (parseProgram)
 
@@ -42,7 +42,7 @@ import Data.Maybe (isJust, fromMaybe, mapMaybe, catMaybes)
 
 import Control.Monad (when, unless)
 
-import "monads-tf" Control.Monad.State (get, liftIO, runStateT)
+import "monads-tf" Control.Monad.State (liftIO, runStateT, gets)
 
 import Data.Foldable (traverse_, for_)
 
@@ -79,10 +79,10 @@ runStatementI (StatementI sourcePos (If expr a b)) = do
 -- | Interpret a module declaration.
 runStatementI (StatementI sourcePos (NewModule name argTemplate suite)) = do
     argTemplate' <- for argTemplate $ \(argName, defexpr) -> do
-        defval <- mapMaybeM (evalExpr sourcePos) defexpr
+        defval <- traverse (evalExpr sourcePos) defexpr
         pure (argName, defval)
     argNames <-  for argTemplate $ \(argName, defexpr) -> do
-      defval <- mapMaybeM (evalExpr sourcePos) defexpr
+      defval <- traverse (evalExpr sourcePos) defexpr
       let
         hasDefault = isJust defval
       pure (argName, hasDefault)
@@ -251,11 +251,8 @@ runStatementI (StatementI sourcePos (ModuleCall (Symbol name) argsExpr suite)) =
 
 -- | Interpret an include or use statement.
 runStatementI (StatementI sourcePos (Include name injectVals)) = do
-    scadOpts <- scadOptions
-    let
-      allowInclude :: ScadOpts -> Bool
-      allowInclude (ScadOpts _ allow) = allow
-    if allowInclude scadOpts
+    opts <- scadOptions
+    if importsAllowed opts
       then do
       name' <- getRelPath name
       content <- liftIO $ readFile name'
@@ -265,10 +262,12 @@ runStatementI (StatementI sourcePos (Include name injectVals)) = do
             vals <- getVals
             putVals []
             runSuite sts
-            vals' <- getVals
-            if injectVals then putVals (vals' <> vals) else putVals vals
-      else
-        warnC sourcePos $ "Not importing " <> name <> ": File import disabled."
+            if injectVals
+              then do
+                vals' <- getVals
+                putVals $ vals' <> vals
+              else putVals vals
+      else warnC sourcePos $ "Not importing " <> name <> ": File import disabled."
 
 runStatementI (StatementI _ DoNothing) = pure ()
 
@@ -277,11 +276,8 @@ runSuite = traverse_ runStatementI
 
 runSuiteCapture :: VarLookup -> [StatementI] -> StateC [OVal]
 runSuiteCapture varlookup suite = do
-    (CompState (_ , _, path, _, opts)) <- get
-    (res, CompState (_, _, _, messages, _)) <- liftIO $ runStateT
-        (runSuite suite *> getVals)
-        (CompState (varlookup, [], path, [], opts))
-    let
+    (res, s) <- gets mkState >>= liftIO . runStateT (runSuite suite *> getVals)
+    reverse res <$ traverse moveMessage (messages s)
+    where
+      mkState s = CompState varlookup [] (filePath s) [] (scadOpts s)
       moveMessage (Message mtype mpos text) = addMessage mtype mpos text
-    traverse_ moveMessage messages
-    pure $ reverse res
