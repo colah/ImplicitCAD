@@ -4,8 +4,6 @@
 
 module Graphics.Implicit.Export.Symbolic.Rebound2 (rebound2) where
 
-import Prelude()
-
 import Graphics.Implicit.Definitions (BoxedObj2, ℝ2)
 
 import Data.VectorSpace ((^-^), (^+^), (^/))

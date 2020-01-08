@@ -2,13 +2,10 @@
 -- Copyright (C) 2014 2015, Julia Longtin (julial@turinglace.com)
 -- Released under the GNU AGPLV3+, see LICENSE
 
--- Allow us to use explicit foralls when writing function type declarations.
-{-# LANGUAGE ExplicitForAll #-}
-
 -- FIXME: required. why?
 {-# LANGUAGE ViewPatterns #-}
 
-{-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE NoMonomorphismRestriction #-}
 
 {-# LANGUAGE TypeSynonymInstances #-}
 
@@ -100,7 +97,6 @@ instance (OTypeMirror a, OTypeMirror b) => OTypeMirror (a -> b) where
         let
             oInput = toOObj input
             oOutput = f oInput
-            output :: Maybe b
             output = fromOObj oOutput
         in
           fromMaybe (error $ "coercing OVal to a -> b isn't always safe; use a -> Maybe b"
@@ -108,13 +104,13 @@ instance (OTypeMirror a, OTypeMirror b) => OTypeMirror (a -> b) where
     fromOObj _ = Nothing
     {-# INLINABLE fromOObj #-}
     toOObj f = OFunc $ \oObj ->
-        case fromOObj oObj :: Maybe a of
+        case fromOObj oObj of
             Nothing  -> OError ["bad input type"]
             Just obj -> toOObj $ f obj
 
 instance (OTypeMirror a, OTypeMirror b) => OTypeMirror (Either a b) where
-    fromOObj (fromOObj -> Just (x :: a)) = Just $ Left  x
-    fromOObj (fromOObj -> Just (x :: b)) = Just $ Right x
+    fromOObj (fromOObj -> Just x) = Just $ Left  x
+    fromOObj (fromOObj -> Just x) = Just $ Right x
     fromOObj _ = Nothing
     {-# INLINABLE fromOObj #-}
 
@@ -141,17 +137,16 @@ getErrors (OError er) = Just $ head er
 getErrors (OList l)   = msum $ fmap getErrors l
 getErrors _           = Nothing
 
-caseOType :: forall c a. a -> (a -> c) -> c
+caseOType :: a -> (a -> c) -> c
 caseOType = flip ($)
 
 infixr 2 <||>
-(<||>) :: forall desiredType out. (OTypeMirror desiredType)
+(<||>) :: OTypeMirror desiredType
     => (desiredType -> out)
     -> (OVal -> out)
     -> (OVal -> out)
 (<||>) f g input =
     let
-        coerceAttempt :: Maybe desiredType
         coerceAttempt = fromOObj input
     in
         maybe (g input) f coerceAttempt

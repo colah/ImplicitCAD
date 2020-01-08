@@ -2,9 +2,6 @@
 -- Copyright (C) 2014, 2015, 2016 Julia Longtin (julial@turinglace.com)
 -- Released under the GNU AGPLV3+, see LICENSE
 
--- Allow us to use explicit foralls when writing function type declarations.
-{-# LANGUAGE ExplicitForAll #-}
-
 -- Make string litearls more polymorphic, so we can use them with Builder.
 {-# LANGUAGE OverloadedStrings #-}
 
@@ -59,16 +56,16 @@ cleanupTris tris =
 -}
 
         -- | Does this triangle fail because it is constrained on two axises?
-        isDegenerateTri2Axis :: forall a. (Eq a) => ((a, a, a),(a, a, a),(a, a, a)) -> Bool
+        isDegenerateTri2Axis :: Eq a => ((a, a, a),(a, a, a),(a, a, a)) -> Bool
         isDegenerateTri2Axis tri = (ysame tri && xsame tri) || (zsame tri && ysame tri) || (zsame tri && xsame tri)
           where
-            same :: forall a. Eq a => (a, a, a) -> Bool
+            same :: Eq a => (a, a, a) -> Bool
             same (n1, n2, n3) = n1 == n2 && n2 == n3
-            xsame :: forall a. Eq a => ((a, a, a), (a, a, a), (a, a, a)) -> Bool
+            xsame :: Eq a => ((a, a, a), (a, a, a), (a, a, a)) -> Bool
             xsame ((x1,_,_),(x2,_,_),(x3,_,_)) = same (x1, x2, x3)
-            ysame :: forall a. Eq a => ((a, a, a), (a, a, a), (a, a, a)) -> Bool
+            ysame :: Eq a => ((a, a, a), (a, a, a), (a, a, a)) -> Bool
             ysame ((_,y1,_),(_,y2,_),(_,y3,_)) = same (y1, y2, y3)
-            zsame :: forall a. Eq a => ((a, a, a), (a, a, a), (a, a, a)) -> Bool
+            zsame :: Eq a => ((a, a, a), (a, a, a), (a, a, a)) -> Bool
             zsame ((_,_,z1),(_,_,z2),(_,_,z3)) = same (z1, z2, z3)
         isDegenerateTri :: Triangle -> Bool
         isDegenerateTri (Triangle (a, b, c)) = isDegenerateTri2Axis floatTri  -- || (isDegenerateTriLine $ floatTri) || (isDegenerateTriPoint $ floatTri)

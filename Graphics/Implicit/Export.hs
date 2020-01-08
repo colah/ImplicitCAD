@@ -3,9 +3,6 @@
 -- Copyright (C) 2015 2016, Mike MacHenry (mike.machenry@gmail.com)
 -- Released under the GNU AGPLV3+, see LICENSE
 
--- Allow us to use explicit foralls when writing function type declarations.
-{-# LANGUAGE ExplicitForAll #-}
-
 -- Allow us to use real types in the type constraints.
 {-# LANGUAGE FlexibleContexts #-}
 
@@ -61,25 +58,25 @@ formatObject :: (DiscreteAproxable obj aprox)
     -> Text             -- ^ Resulting lazy ByteString
 formatObject res formatWriter = formatWriter . discreteAprox res
 
-writeSVG :: forall obj. DiscreteAproxable obj [Polyline] => ℝ -> FilePath -> obj -> IO ()
+writeSVG :: DiscreteAproxable obj [Polyline] => ℝ -> FilePath -> obj -> IO ()
 writeSVG res = writeObject res PolylineFormats.svg
 
-writeDXF2 :: forall obj. DiscreteAproxable obj [Polyline] => ℝ -> FilePath -> obj -> IO ()
+writeDXF2 :: DiscreteAproxable obj [Polyline] => ℝ -> FilePath -> obj -> IO ()
 writeDXF2 res = writeObject res PolylineFormats.dxf2
 
-writeSTL :: forall obj. DiscreteAproxable obj TriangleMesh => ℝ -> FilePath -> obj -> IO ()
+writeSTL :: DiscreteAproxable obj TriangleMesh => ℝ -> FilePath -> obj -> IO ()
 writeSTL res = writeObject res TriangleMeshFormats.stl
 
-writeBinSTL :: forall obj. DiscreteAproxable obj TriangleMesh => ℝ -> FilePath -> obj -> IO ()
+writeBinSTL :: DiscreteAproxable obj TriangleMesh => ℝ -> FilePath -> obj -> IO ()
 writeBinSTL res file obj = LBS.writeFile file $ TriangleMeshFormats.binaryStl $ discreteAprox res obj
 
-writeOBJ :: forall obj. DiscreteAproxable obj NormedTriangleMesh => ℝ -> FilePath -> obj -> IO ()
+writeOBJ :: DiscreteAproxable obj NormedTriangleMesh => ℝ -> FilePath -> obj -> IO ()
 writeOBJ res = writeObject res NormedTriangleMeshFormats.obj
 
-writeTHREEJS :: forall obj. DiscreteAproxable obj TriangleMesh => ℝ -> FilePath -> obj -> IO ()
+writeTHREEJS :: DiscreteAproxable obj TriangleMesh => ℝ -> FilePath -> obj -> IO ()
 writeTHREEJS res = writeObject res TriangleMeshFormats.jsTHREE
 
-writeGCodeHacklabLaser :: forall obj. DiscreteAproxable obj [Polyline] => ℝ -> FilePath -> obj -> IO ()
+writeGCodeHacklabLaser :: DiscreteAproxable obj [Polyline] => ℝ -> FilePath -> obj -> IO ()
 writeGCodeHacklabLaser res = writeObject res PolylineFormats.hacklabLaserGCode
 
 writeSCAD3 :: ℝ -> FilePath -> SymbolicObj3 -> IO ()
@@ -88,5 +85,5 @@ writeSCAD3 res filename obj = LT.writeFile filename $ SymbolicFormats.scad3 res 
 writeSCAD2 :: ℝ -> FilePath -> SymbolicObj2 -> IO ()
 writeSCAD2 res filename obj = LT.writeFile filename $ SymbolicFormats.scad2 res obj
 
-writePNG :: forall obj. DiscreteAproxable obj ImageFormatCodecs.DynamicImage => ℝ -> FilePath -> obj -> IO ()
+writePNG :: DiscreteAproxable obj ImageFormatCodecs.DynamicImage => ℝ -> FilePath -> obj -> IO ()
 writePNG res = writeObject' res ImageFormatCodecs.savePngImage
