@@ -16,11 +16,11 @@ module Graphics.Implicit.ExtOpenScad.Definitions (ArgParser(AP, APTest, APBranch
                                                   TestInvariant(EulerCharacteristic),
                                                   SourcePosition(SourcePosition),
                                                   StateC,
-                                                  CompState(CompState),
+                                                  CompState(..),
                                                   VarLookup(VarLookup),
                                                   Message(Message),
                                                   MessageType(..),
-                                                  ScadOpts(ScadOpts),
+                                                  ScadOpts(..),
                                                   lookupVarIn,
                                                   varUnion
                                                   ) where
@@ -43,7 +43,13 @@ import Data.List (intercalate)
 import "monads-tf" Control.Monad.State (StateT)
 
 -- | This is the state of a computation. It contains a hash of variables/functions, an array of OVals, a path, messages, and options controlling code execution.
-newtype CompState = CompState (VarLookup, [OVal], FilePath, [Message], ScadOpts)
+data CompState = CompState
+  { varLookup :: VarLookup
+  , oVals     :: [OVal]
+  , filePath  :: FilePath
+  , messages  :: [Message]
+  , scadOpts  :: ScadOpts
+  }
 
 type StateC = StateT CompState IO
 
@@ -192,7 +198,7 @@ data SourcePosition = SourcePosition
 
 instance Show SourcePosition where
     show (SourcePosition line col []) = "line " <> show (fromFastℕ line :: Int) <> ", column " <> show (fromFastℕ col :: Int)
-    show (SourcePosition line col filePath) = "line " <> show (fromFastℕ line :: Int) <> ", column " <> show (fromFastℕ col :: Int) <> ", file " <> filePath
+    show (SourcePosition line col path) = "line " <> show (fromFastℕ line :: Int) <> ", column " <> show (fromFastℕ col :: Int) <> ", file " <> path
 
 -- | The types of messages the execution engine can send back to the application.
 data MessageType = TextOut -- text intetionally output by the ExtOpenScad program.
@@ -212,8 +218,9 @@ instance Show Message where
 
 -- | Options changing the behavior of the extended OpenScad engine.
 data ScadOpts = ScadOpts
-  Bool -- openScadCompatibility
-  Bool -- Imports allowed.
+  { openScadCompatibility :: Bool
+  , importsAllowed        :: Bool
+  }
 
 -- helper, to use union on VarLookups.
 varUnion :: VarLookup -> VarLookup -> VarLookup

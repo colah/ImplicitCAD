@@ -6,6 +6,9 @@
 -- We don't actually care, but when we compile our haskell examples, we do.
 {-# LANGUAGE PackageImports #-}
 
+-- So GHC doesn't complain about varLookup and sourcePos from ExprState
+{-# OPTIONS_GHC -Wno-unused-top-binds #-}
+
 module Graphics.Implicit.ExtOpenScad.Eval.Expr (evalExpr, matchPat) where
 
 import Prelude (String, Maybe(Just, Nothing), ($), fmap, pure, zip, (!!), const, (<>), foldr, foldMap, (.), (<$>), traverse)
@@ -42,7 +45,12 @@ import Control.Monad (zipWithM)
 
 import "monads-tf" Control.Monad.State (StateT, get, modify, runState)
 
-newtype ExprState = ExprState (VarLookup, [String], [Message], SourcePosition)
+data ExprState = ExprState
+  { varLookup :: VarLookup
+  , patterns  :: [String]
+  , messages  :: [Message]
+  , sourcePos :: SourcePosition
+  }
 type StateE = StateT ExprState Identity
 
 -- Add a message to our list of messages contained in the StatE monad.
@@ -50,7 +58,7 @@ addMessage :: MessageType -> SourcePosition -> String -> StateE ()
 addMessage mtype pos text = addMesg $ Message mtype pos text
   where
     addMesg :: Message -> StateE ()
-    addMesg = modify . (\message (ExprState (a, b, messages, c)) -> ExprState (a, b, messages <> [message], c))
+    addMesg m = modify $ \s -> s { messages = messages s <> pure m }
 
 -- Log an error condition.
 errorE :: SourcePosition -> String -> StateE ()
@@ -78,9 +86,9 @@ evalExpr :: SourcePosition -> Expr -> StateC OVal
 evalExpr pos expr = do
     varlookup <- getVarLookup
     let
-      (valf, ExprState (_, _, messages, _)) = runState (evalExpr' expr) $ ExprState (varlookup, [], [], pos)
+      (valf, s) = runState (evalExpr' expr) $ ExprState varlookup [] [] pos
       moveMessage (Message mtype mpos text) = GIEUS.addMessage mtype mpos text
-    traverse_ moveMessage messages
+    traverse_ moveMessage $ messages s
     pure $ valf []
 
 -- The expression evaluators.
@@ -88,7 +96,7 @@ evalExpr' :: Expr -> StateE ([OVal] -> OVal)
 
 -- Evaluate a variable lookup.
 evalExpr' (Var (Symbol name)) = do
-  (ExprState (VarLookup varlookup, namestack, _, spos)) <- get
+  (ExprState (VarLookup varlookup) namestack _ spos) <- get
   case (lookup (Symbol name) varlookup, elemIndex name namestack) of
         (_, Just pos) -> pure (!! pos)
         (Just val, _) -> pure $ const val
@@ -121,7 +129,7 @@ evalExpr' (fexpr :$ argExprs) = do
 -- Evaluate a lambda function.
 evalExpr' (LamE pats fexpr) = do
     fparts <- for pats $ \pat -> do
-        modify (\(ExprState (a,b,c,d)) -> ExprState (a, patVars pat <> b,c,d))
+        modify $ \s -> s { patterns = patVars pat  <> patterns s }
         pure $ \f xss -> OFunc $ \val -> case patMatch pat val of
             Just xs -> f (xs <> xss)
             Nothing -> OError ["Pattern match failed"]
