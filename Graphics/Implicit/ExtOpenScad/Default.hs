@@ -299,6 +299,7 @@ defaultPolymorphicFunctions =
                 [(ceiling a), (ceiling (a+b)).. (floor c)]
         list_gen _ = Nothing
 
+        ternary :: Bool -> t -> t -> t
         ternary True a _ = a
         ternary False _ b = b
 
