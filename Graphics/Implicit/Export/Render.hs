@@ -2,15 +2,26 @@
 -- Implicit CAD. Copyright (C) 2011, Christopher Olah (chris@colah.ca)
 -- Released under the GNU AGPLV3+, see LICENSE
 
+{-# LANGUAGE RankNTypes #-}
+
 -- Allow us to use the tearser parallel list comprehension syntax, to avoid having to call zip in the complicated comprehensions below.
 {-# LANGUAGE ParallelListComp #-}
 
 -- export getContour and getMesh, which returns the edge of a 2D object, or the surface of a 3D object, respectively.
 module Graphics.Implicit.Export.Render (getMesh, getContour) where
 
-import Prelude(error, (-), ceiling, ($), (+), (*), max, div, tail, fmap, reverse, (.), foldMap, min, Int, (<>), (<$>))
+import Prelude (Monoid, pure, mconcat, (<*>), fromIntegral, error, (-), ceiling, ($), (+), (*), max, div, tail, fmap, reverse, (.), foldMap, min, Int, (<$>))
 
-import Graphics.Implicit.Definitions (ℝ, ℕ, Fastℕ, ℝ2, ℝ3, TriangleMesh, Obj2, SymbolicObj2, Obj3, SymbolicObj3, Polyline(Polyline), (⋯/), fromℕtoℝ, fromℕ)
+import Control.Lens (Lens', (-~), view, (.~), (+~), (&))
+import Data.Foldable(fold)
+import Data.Maybe (fromMaybe)
+import qualified Data.Vector.Unboxed.V3 as V
+
+import Graphics.Implicit.Primitives (getImplicit)
+
+import Graphics.Implicit.Definitions (ℝ, ℕ, Fastℕ, ℝ2, ℝ3, TriangleMesh, Obj2, Polyline(getPolyline), (⋯/), fromℕtoℝ, fromℕ)
+
+import Graphics.Implicit.Definitions (SymbolicObj2, SymbolicObj3)
 
 import Graphics.Implicit.Export.Symbolic.Rebound2 (rebound2)
 
@@ -18,8 +29,8 @@ import Graphics.Implicit.Export.Symbolic.Rebound3 (rebound3)
 
 import Graphics.Implicit.ObjectUtil (getBox2, getBox3)
 
-import Data.Foldable(fold)
-import Linear ( V3(V3), V2(V2) )
+import Graphics.Implicit.Export.Render.Definitions (TriSquare)
+import Linear ( V3(V3), V2(V2), _x, _y, _z, _yz, _xz, _xy)
 
 -- Here's the plan for rendering a cube (the 2D case is trivial):
 
@@ -47,7 +58,7 @@ import Graphics.Implicit.Export.Render.HandleSquares (mergedSquareTris)
 -- Success: This is our mesh.
 
 -- Each step on the Z axis is done in parallel using Control.Parallel.Strategies
-import Control.Parallel.Strategies (using, rdeepseq, parBuffer)
+import Control.Parallel.Strategies (NFData, using, rdeepseq, parBuffer)
 
 -- The actual code is just a bunch of ugly argument passing.
 -- Utility functions can be found at the end.
@@ -68,8 +79,7 @@ import Control.Parallel.Strategies (using, rdeepseq, parBuffer)
 
 -- For the 2D case, we need one last thing, cleanLoopsFromSegs:
 import Graphics.Implicit.Export.Render.HandlePolylines (cleanLoopsFromSegs)
-import Data.Maybe (fromMaybe)
-import Graphics.Implicit.Primitives (getImplicit)
+
 
 -- Set the default types for the numbers in this file.
 default (ℕ, Fastℕ, ℝ)
@@ -84,109 +94,113 @@ getMesh res@(V3 xres yres zres) symObj =
         d = p2 - p1
 
         -- How many steps will we take on each axis?
-        nx :: ℕ
-        ny :: ℕ
-        nz :: ℕ
-        (V3 nx ny nz) = ceiling `fmap` ( d ⋯/ res)
+        nx, ny, nz :: Int
+        steps@(V3 nx ny nz) = fmap ceiling ( d ⋯/ res)
 
         -- How big are the steps?
-        (V3 rx ry rz) = d ⋯/ (fromℕtoℝ `fmap` V3 nx ny nz)
+        (V3 rx ry rz) = d ⋯/ fmap fromIntegral steps
 
-        -- The positions we're rendering.
-        pXs = [ x1 + rx*fromℕtoℝ n | n <- [0.. nx] ]
-        pYs = [ y1 + ry*fromℕtoℝ n | n <- [0.. ny] ]
-        pZs = [ z1 + rz*fromℕtoℝ n | n <- [0.. nz] ]
+        -- Add @n@ steps of size @dx@ to @x0@
+        stepwise :: ℝ -> ℝ -> Int -> ℝ
+        stepwise x0 dx n = x0 + dx * fromIntegral n
+        {-# INLINE stepwise #-}
 
-        -- | performance tuning.
-        -- FIXME: magic number.
-        forcesteps :: Int
-        forcesteps=32
+        -- Get a point in space by running @stepwise@ in every dimension
+        stepping :: V3 (Int -> ℝ)
+        stepping = V3 (stepwise x1 rx) (stepwise y1 ry) (stepwise z1 rz)
 
-        -- | Perform a given function on every point in a 3D grid.
-        par3DList :: ℕ -> ℕ -> ℕ -> ((ℕ -> ℝ) -> ℕ -> (ℕ -> ℝ) -> ℕ -> (ℕ -> ℝ) -> ℕ -> ℝ) -> [[[ℝ]]]
-        par3DList lenx leny lenz f =
-            [[[f
-                (\n -> x1 + rx*fromℕtoℝ (mx+n)) mx
-                (\n -> y1 + ry*fromℕtoℝ (my+n)) my
-                (\n -> z1 + rz*fromℕtoℝ (mz+n)) mz
-            | mx <- [0..lenx] ] | my <- [0..leny] ] | mz <- [0..lenz] ]
-                `using` parBuffer (max 1 $ div (fromℕ $ lenx+leny+lenz) forcesteps) rdeepseq
-
-        -- | Evaluate obj to avoid waste in mids, segs, later.
-        objV = par3DList (nx+2) (ny+2) (nz+2) $ \x _ y _ z _ -> obj $ V3 (x 0) (y 0) (z 0)
+        -- Memoized access to @obj@
+        sample :: V3 Int -> ℝ
+        sample = V.memoize steps $ \v -> obj $ stepping <*> v
+        {-# NOINLINE sample #-}  -- don't inline it, or we lose our memoization
 
         -- (1) Calculate mid points on X, Y, and Z axis in 3D space.
-        midsZ = [[[
-                 interpolate (V2 z0 objX0Y0Z0) (V2 z1' objX0Y0Z1) (appABC obj x0 y0) zres
-                 | x0 <- pXs |                   objX0Y0Z0 <- objY0Z0 | objX0Y0Z1 <- objY0Z1
-                ]| y0 <- pYs |                   objY0Z0   <- objZ0   | objY0Z1   <- objZ1
-                ]| z0 <- pZs | z1' <- tail pZs | objZ0     <- objV    | objZ1     <- tail objV
-                ] `using` parBuffer (max 1 $ div (fromℕ nz) forcesteps) rdeepseq
+        mkMids :: (forall a. Lens' (V3 a) a) -> V.VectorV3 ℝ
+        mkMids l =
+          V.mkVectorV3 (steps & l -~ 1) $ \v -> do
+            let stepped    = stepping <*> v
+                stepped_up = stepping <*> (v + 1)
+            interpolate
+                (V2 (view l stepped) $ sample v)
+                (V2 (view l stepped_up) $ sample $ v & l +~ 1)
+                (\x -> obj $ stepped & l .~ x)
+                (view l res)
 
-        midsY = [[[
-                 interpolate (V2 y0 objX0Y0Z0) (V2 y1' objX0Y1Z0) (appACB obj x0 z0) yres
-                 | x0 <- pXs |                   objX0Y0Z0 <- objY0Z0 | objX0Y1Z0 <- objY1Z0
-                ]| y0 <- pYs | y1' <- tail pYs | objY0Z0   <- objZ0   | objY1Z0   <- tail objZ0
-                ]| z0 <- pZs |                   objZ0     <- objV
-                ] `using` parBuffer (max 1 $ div (fromℕ ny) forcesteps) rdeepseq
-
-        midsX = [[[
-                 interpolate (V2 x0 objX0Y0Z0) (V2 x1' objX1Y0Z0) (appBCA obj y0 z0) xres
-                 | x0 <- pXs | x1' <- tail pXs | objX0Y0Z0 <- objY0Z0 | objX1Y0Z0 <- tail objY0Z0
-                ]| y0 <- pYs |                   objY0Z0   <- objZ0
-                ]| z0 <- pZs |                   objZ0     <- objV
-                ] `using` parBuffer (max 1 $ div (fromℕ nx) forcesteps) rdeepseq
+        -- (1) Calculate mid points on X, Y, and Z axis in 3D space.
+        midsX, midsY, midsZ :: V.VectorV3 ℝ
+        midsX = mkMids _x
+        midsY = mkMids _y
+        midsZ = mkMids _z
 
         -- (2) Calculate segments for each side
-        segsZ = [[[
-            injZ z0 <$> getSegs (V2 x0 y0) (V2 x1' y1') (obj **$ z0) (objX0Y0Z0, objX1Y0Z0, objX0Y1Z0, objX1Y1Z0) (midA0, midA1, midB0, midB1)
-             | x0<-pXs | x1'<-tail pXs |midB0<-mX''  | midB1<-mX'T     | midA0<-mY''  | midA1<-tail mY''  | objX0Y0Z0<-objY0Z0 | objX1Y0Z0<- tail objY0Z0 | objX0Y1Z0<-objY1Z0    | objX1Y1Z0<-tail objY1Z0
-            ]| y0<-pYs | y1'<-tail pYs |mX'' <-mX'   | mX'T <-tail mX' | mY'' <-mY'                       | objY0Z0  <-objZ0                              | objY1Z0  <-tail objZ0
-            ]| z0<-pZs                 |mX'  <-midsX |                   mY'  <-midsY                     | objZ0    <-objV
-            ] `using` parBuffer (max 1 $ div (fromℕ nz) forcesteps) rdeepseq
+        mkSegs
+            :: (forall a. Lens' (V3 a) a)
+               -- ^ A lens towards the dimension we're building segments for
+            -> (forall a. Lens' (V3 a) (V2 a))
+               -- ^ A lens selecting the other two dimensions, in lexographical
+               -- order --- that is, use @_xy@ instead of @_yx@.
+           -> V3 Int
+            -> [[ℝ3]]
+        mkSegs l l' =
+          let mids = V3 midsX midsY midsZ
+              midA = view (l' . _y) mids  -- '_y' here refers to the second
+                                          -- component of the 'V2' selected by
+                                          -- @l'@ --- which is to say, it
+                                          -- selects the Z dimension when
+                                          -- @l' = _xz@
+              midB = view (l' . _x) mids
+           in \v ->
+                 let
+                     -- the position in space for index @v@
+                     stepped    = stepping <*> v
+                     -- the next position in space, stepwise
+                     stepped_up = stepping <*> (v + 1)
+                     x0 = view l stepped
 
-        segsY = [[[
-            injY y0 <$> getSegs (V2 x0 z0) (V2 x1' z1') (obj *$* y0) (objX0Y0Z0, objX1Y0Z0, objX0Y0Z1, objX1Y0Z1) (midA0, midA1, midB0, midB1)
-             | x0<-pXs | x1'<-tail pXs | midB0<-mB''  | midB1<-mBT'       | midA0<-mA''  | midA1<-tail mA'' | objX0Y0Z0<-objY0Z0 | objX1Y0Z0<-tail objY0Z0 | objX0Y0Z1<-objY0Z1 | objX1Y0Z1<-tail objY0Z1
-            ]| y0<-pYs |                 mB'' <-mB'   | mBT' <-mBT        | mA'' <-mA'                      | objY0Z0  <-objZ0                             | objY0Z1  <-objZ1
-            ]| z0<-pZs | z1'<-tail pZs | mB'  <-midsX | mBT  <-tail midsX | mA'  <-midsZ                    | objZ0    <-objV                              | objZ1    <-tail objV
-            ] `using` parBuffer (max 1 $ div (fromℕ ny) forcesteps) rdeepseq
+                     -- | Transform a vector in R2 into one in R3 by setting
+                     -- its @l@-focused dimension to @x0@.
+                     injectDimension :: ℝ2 -> ℝ3
+                     injectDimension yz = 0 & l .~ x0 & l' .~ yz
+                  in expandPolyline injectDimension <$>
+                        getSegs
+                          (view l' stepped)
+                          (view l' stepped_up)
+                          (\yz -> obj $ 0 & l .~ x0 & l' .~ yz)
+                          ( sample v
+                          , sample $ v & l' . _x +~ 1
+                          , sample $ v & l' . _y +~ 1
+                          , sample $ v & l' +~ 1
+                          )
+                          ( midA V.! v
+                          , midA V.! (v & l' . _x +~ 1)
+                          , midB V.! v
+                          , midB V.! (v & l' . _y +~ 1)
+                          )
+        {-# INLINE mkSegs #-}
 
-        segsX = [[[
-            injX x0 <$> getSegs (V2 y0 z0) (V2 y1' z1') (obj $** x0) (objX0Y0Z0, objX0Y1Z0, objX0Y0Z1, objX0Y1Z1) (midA0, midA1, midB0, midB1)
-             | x0<-pXs |                 midB0<-mB''  | midB1<-mBT'       | midA0<-mA''  | midA1<-mA'T     | objX0Y0Z0<-objY0Z0 | objX0Y1Z0<-objY1Z0    | objX0Y0Z1<-objY0Z1    | objX0Y1Z1<-     objY1Z1
-            ]| y0<-pYs | y1'<-tail pYs | mB'' <-mB'   | mBT' <-mBT        | mA'' <-mA'   | mA'T <-tail mA' | objY0Z0  <-objZ0   | objY1Z0  <-tail objZ0 | objY0Z1  <-objZ1      | objY1Z1  <-tail objZ1
-            ]| z0<-pZs | z1'<-tail pZs | mB'  <-midsY | mBT  <-tail midsY | mA'  <-midsZ                   | objZ0    <- objV                           | objZ1    <- tail objV
-            ] `using` parBuffer (max 1 $ div (fromℕ nx) forcesteps) rdeepseq
-
-        -- (3) & (4) : get and tesselate loops
         -- FIXME: hack.
         minres = xres `min` yres `min` zres
-        sqTris = [[[
-            foldMap (tesselateLoop minres obj) $
-              fromMaybe (error "unclosed loop in paths given") $ getLoops $
-                        segX''' <>
-                   mapR segX''T <>
-                   mapR segY''' <>
-                        segY'T' <>
-                        segZ''' <>
-                   mapR segZT''
-             | segZ'''<- segZ''| segZT''<- segZT'
-             | segY'''<- segY''| segY'T'<- segY'T
-             | segX'''<- segX''| segX''T<- tail segX''
 
-            ]| segZ'' <- segZ' | segZT' <- segZT
-             | segY'' <- segY' | segY'T <- tail segY'
-             | segX'' <- segX'
-
-            ]| segZ'  <- segsZ | segZT  <- tail segsZ
-             | segY'  <- segsY
-             | segX'  <- segsX
-            ] `using` parBuffer (max 1 $ div (fromℕ $ nx+ny+nz) forcesteps) rdeepseq
+        -- (3) & (4) : get and tesselate loops
+        sqTris :: [TriSquare]
+        sqTris = parallelize (nx + ny + nz) $ do
+          let segsX = mkSegs _x _yz
+              segsY = mkSegs _y _xz
+              segsZ = mkSegs _z _xy
+          forXYZM (steps - 1) $ \v -> do
+            foldMap (tesselateLoop minres obj) $ fromMaybe (error "unclosed loop in paths given") $ getLoops $
+              mconcat
+                [        segsX v
+                , mapR $ segsX (v & _x +~ 1)
+                , mapR $ segsY v
+                ,        segsY (v & _y +~ 1)
+                ,        segsZ v
+                , mapR $ segsZ (v & _z +~ 1)
+                ]
 
     in
       -- (5) merge squares, etc
-      mergedSquareTris . fold . fold $ fold sqTris
+      mergedSquareTris sqTris
 
 -- | getContour gets a polyline describing the edge of a 2D object.
 getContour :: ℝ2 -> SymbolicObj2 -> [Polyline]
@@ -209,11 +223,6 @@ getContour res@(V2 xres yres) symObj =
         -- The points inside of the region.
         pYs = [ y1 + ry*fromℕtoℝ p | p <- [0.. ny] ]
         pXs = [ x1 + rx*fromℕtoℝ p | p <- [0.. nx] ]
-
-        -- | Performance tuning.
-        -- FIXME: magic number.
-        forcesteps :: Int
-        forcesteps=32
 
         par2DList :: ℕ -> ℕ -> ((ℕ -> ℝ) -> ℕ -> (ℕ -> ℝ) -> ℕ -> ℝ) -> [[ℝ]]
         par2DList lenx leny f =
@@ -252,30 +261,11 @@ getContour res@(V2 xres yres) symObj =
 
 -- utility functions
 
-injX :: ℝ -> Polyline -> [ℝ3]
-injX a (Polyline xs) = fmap (prepend a) xs
-prepend :: ℝ -> ℝ2 -> ℝ3
-prepend a (V2 b c) = V3 a b c
-injY :: ℝ -> Polyline -> [ℝ3]
-injY a (Polyline xs) = fmap (insert a) xs
-insert :: ℝ -> ℝ2 -> ℝ3
-insert b (V2 a c) = V3 a b c
-injZ :: ℝ -> Polyline -> [ℝ3]
-injZ a (Polyline xs) = fmap (postfix a) xs
-postfix :: ℝ -> ℝ2 -> ℝ3
-postfix c (V2 a b) = V3 a b c
-
-($**) :: Obj3 -> ℝ -> ℝ2 -> ℝ
-f $** a = \(V2 b c) -> f (V3 a b c)
-infixr 0 $**
-
-(*$*) :: Obj3 -> ℝ -> ℝ2 -> ℝ
-f *$* b = \(V2 a c) -> f (V3 a b c)
-infixr 0 *$*
-
-(**$) :: Obj3 -> ℝ -> ℝ2 -> ℝ
-f **$ c = \(V2 a b) -> f (V3 a b c)
-infixr 0 **$
+------------------------------------------------------------------------------
+-- | Run a function lifting every point in a 'Polyline' into R3.
+expandPolyline :: (ℝ2 -> ℝ3) -> Polyline -> [ℝ3]
+expandPolyline f = fmap f . getPolyline
+{-# INLINE expandPolyline #-}
 
 ($*) :: Obj2 -> ℝ -> ℝ -> ℝ
 f $* a = f . V2 a
@@ -285,13 +275,37 @@ infixr 0 $*
 f *$ b = \a -> f (V2 a b)
 infixr 0 *$
 
-appABC :: Obj3 -> ℝ -> ℝ -> ℝ -> ℝ
-appABC f a b c = f (V3 a b c)
-appBCA :: Obj3 -> ℝ -> ℝ -> ℝ -> ℝ
-appBCA f b c a = f (V3 a b c)
-appACB :: Obj3 -> ℝ -> ℝ -> ℝ -> ℝ
-appACB f a c b = f (V3 a b c)
-
 mapR :: [[ℝ3]] -> [[ℝ3]]
 mapR = fmap reverse
+{-# INLINE mapR #-}
+
+
+------------------------------------------------------------------------------
+-- | Monoidally combine a value produced at every point in the given space.
+forXYZM
+    :: Monoid m
+    => V3 Int         -- ^ Inclusive bounds
+    -> (V3 Int -> m)  -- ^ Function to produce monoidal values
+    -> m
+forXYZM (V3 x y z) f = fold $ do
+  zm <- [0 .. z]
+  ym <- [0 .. y]
+  xm <- [0 .. x]
+  pure $ f $ V3 xm ym zm
+{-# INLINABLE forXYZM #-}
+{-# SPECIALIZE forXYZM :: V3 Int -> (V3 Int -> [TriSquare]) -> [TriSquare] #-}
+
+
+-- | performance tuning.
+-- FIXME: magic number.
+forcesteps :: Int
+forcesteps = 32
+{-# INLINABLE forcesteps #-}
+
+
+------------------------------------------------------------------------------
+-- | Parallelize a list computation by buffering it with @forcesteps@ sparks.
+parallelize :: NFData a => Int -> [a] -> [a]
+parallelize n x = x `using` parBuffer (max 1 $ div n forcesteps) rdeepseq
+{-# INLINABLE parallelize #-}
 
